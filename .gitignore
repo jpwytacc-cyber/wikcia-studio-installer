@@ -1,0 +1,53 @@
+# Wikcia Studio Installer - Git repository ignore rules
+# Payload binaries are distributed as GitHub Release assets, not in git history.
+*.zip
+*.7z
+*.exe
+*.dll
+*.pdb
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.env
+.python-version
+
+# Private state - never commit credentials, sessions, or user data
+auth.json
+.env.*
+config.yaml
+state.db
+state.db-*
+USER.md
+MEMORY.md
+sessions/
+memories/
+lpx-data/
+vault/
+mcp-tokens/
+desktop-user-data/
+
+# Logs and caches
+*.log
+logs/
+cache/
+backups/
+outputs/
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Build staging
+*.building
+bootstrap/
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace

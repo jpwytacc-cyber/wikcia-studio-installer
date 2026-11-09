@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "product": "Wikcia Studio",
+  "purpose": "Installer interface and module inclusion contract, not a blanket functional-certification claim.",
+  "main_tabs": [
+    {"name": "Chat", "path": "/"},
+    {"name": "Studio", "path": "/artifacts"},
+    {"name": "Agents", "path": "/agents"},
+    {"name": "Projects", "path": "/atelier-projects"},
+    {"name": "Tools", "path": "/capabilities"},
+    {"name": "Automations", "path": "/cron"},
+    {"name": "Apps", "path": "/apps"},
+    {"name": "Settings", "path": "/settings"}
+  ],
+  "design_features": ["Wikcia Digital Atelier shell", "Wikcia wordmark and introductory artwork", "Light and dark canvas modes", "Conversation history and session panes", "Intelligence sidebar with model/provider selector, agents and live tasks", "Connected application navigation and native settings"],
+  "desktop_activation": "enabled-by-default; preserve recipient choices",
+  "desktop_packages": [
+    {"id": "love-and-pixels", "display_name": "Love & Pixels Founders Edition", "default_enabled": true},
+    {"id": "wikcia-apps", "display_name": "Wikcia Application Hub", "default_enabled": true},
+    {"id": "wikcia-lead-crm", "display_name": "Lead Intelligence", "default_enabled": true},
+    {"id": "wikcia-maps-research", "display_name": "Maps Research", "default_enabled": true}
+  ],
+  "additional_pages": [
+    {"name": "Love & Pixels Studio", "path": "/love-and-pixels"},
+    {"name": "Multi-LLM Control Center", "path": "/love-and-pixels/multi-llm"},
+    {"name": "Application Hub", "path": "/application-hub"},
+    {"name": "Creative Studio", "path": "/creative-studio"},
+    {"name": "Research Center", "path": "/research-center"},
+    {"name": "Document Intelligence", "path": "/document-intelligence"},
+    {"name": "Workflow Studio", "path": "/workflow-studio"},
+    {"name": "Model & Provider Center", "path": "/provider-center"},
+    {"name": "System Control", "path": "/system-control"},
+    {"name": "Lead Intelligence", "path": "/crm"},
+    {"name": "Maps Research", "path": "/maps-research"}
+  ],
+  "bundled_modules": ["design-station", "wikcia-lead-intelligence", "lpx_swarm"],
+  "expected_core_files": ["hermes_cli/main.py", "brand.config.json", "apps/desktop/src/app/shell/wikcia-atelier.tsx"],
+  "expected_seed_files": [
+    "software/design-station/server.mjs",
+    "software/design-station/website.mjs",
+    "software/design-station/hermes/lpx_swarm/router.py",
+    "software/wikcia-lead-intelligence/wlie/engine.py",
+    "software/wikcia-lead-intelligence/wlie/browser_worker.cjs",
+    "plugins/love-and-pixels/studio/generate.mjs",
+    "plugins/love-and-pixels/studio/site-build.mjs",
+    "plugins/hermes-prime/plugin.yaml",
+    "plugins/love-and-pixels/plugin.yaml",
+    "plugins/wikcia-apps/plugin.yaml",
+    "plugins/wikcia-lead-crm/plugin.yaml",
+    "plugins/wikcia-maps-research/plugin.yaml",
+    "plugins/love-and-pixels/desktop/plugin.js",
+    "plugins/wikcia-apps/desktop/plugin.js",
+    "plugins/wikcia-lead-crm/desktop/plugin.js",
+    "plugins/wikcia-maps-research/desktop/plugin.js",
+    "desktop-plugins/love-and-pixels/plugin.js",
+    "desktop-plugins/wikcia-apps/plugin.js",
+    "desktop-plugins/wikcia-lead-crm/plugin.js",
+    "desktop-plugins/wikcia-maps-research/plugin.js"
+  ],
+  "recipient_setup": ["Authenticate the recipient's own model/provider accounts, or select an installed local model.", "The four bundled Desktop packages are enabled on first launch. Tools > Plugins controls them; explicit recipient disable choices are preserved across repairs and upgrades.", "Start only the application services needed for the task. Do not infer readiness from catalogue presence.", "Respect research acknowledgements, source restrictions and paid-service approvals."],
+  "privacy": "No sender credentials, sessions, projects, CRM records, browser accounts, telemetry decisions or private configuration are included.",
+  "acceptance_boundaries": "Included code/assets, successful installation, native rendering, app processing, model/tool execution, authentication and clean-machine acceptance are distinct checks. No copied credential or mock result substitutes for execution."
+}

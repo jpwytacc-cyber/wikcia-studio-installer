@@ -1,0 +1,290 @@
+"""Wikcia Windows installer. Standard library only; no owner state is imported.
+
+Pure Wikcia rebrand. Downloads/installs every GitHub app component at setup
+time, each verified against a pinned SHA-256. No owner credentials, no Nous
+subscription framing, no Nous upstream version claims.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import zipfile
+from pathlib import Path
+
+
+def extract_zip(archive, target, preserve=False):
+    target = Path(target).resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive) as z:
+        for member in z.infolist():
+            parts = member.filename.replace('\\', '/').split('/')
+            dest = (target / member.filename).resolve()
+            if (any(p in ('..',) or ':' in p for p in parts)
+                    or not dest.is_relative_to(target)
+                    or (member.external_attr >> 16) & 0o170000 == 0o120000):
+                raise ValueError('Unsafe archive entry: ' + member.filename)
+        for member in z.infolist():
+            dest = target / member.filename
+            if member.is_dir():
+                dest.mkdir(parents=True, exist_ok=True)
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if preserve and dest.exists():
+                continue
+            with z.open(member) as src, dest.open('wb') as out:
+                shutil = __import__('shutil')
+                shutil.copyfileobj(src, out)
+
+
+def expanded(value, root):
+    return os.path.expandvars(str(value).replace('{root}', str(root)).replace('{user}', str(Path.home())))
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+import hashlib
+
+
+def download(url, dest, expected_sha256):
+    import re
+    import shutil
+    import urllib.request
+    from urllib.parse import urlsplit
+    parsed = urlsplit(url)
+    if parsed.username or parsed.password or (parsed.scheme != 'https' and not (parsed.scheme == 'http' and parsed.hostname == '127.0.0.1')):
+        raise ValueError('Downloads require credential-free HTTPS URLs.')
+    if not re.fullmatch('[0-9a-fA-F]{64}', expected_sha256 or ''):
+        raise ValueError('A pinned SHA-256 is required.')
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() and sha256(dest).lower() == expected_sha256.lower():
+        return dest
+    dest.unlink(missing_ok=True)
+    partial = dest.with_suffix(dest.suffix + '.partial')
+    try:
+        request = urllib.request.Request(url, headers={'User-Agent': 'WikciaStudio-Installer/1.0'})
+        with urllib.request.urlopen(request, timeout=90) as source, partial.open('wb') as output:
+            shutil.copyfileobj(source, output, 1024 * 1024)
+        if sha256(partial).lower() != expected_sha256.lower():
+            raise ValueError('Downloaded file checksum mismatch: ' + dest.name)
+        partial.replace(dest)
+        return dest
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+def load_bundle(bundle):
+    manifest = json.loads((bundle / 'manifest.json').read_text(encoding='utf-8-sig'))
+    for item in list(manifest['payloads'].values()) + manifest.get('installer_files', []):
+        path = (bundle / item['file']).resolve()
+        if not path.is_relative_to(bundle.resolve()) or not path.is_file() or sha256(path) != item['sha256']:
+            raise ValueError('Bundle checksum failed: ' + item['file'])
+    return manifest
+
+
+def stage(bundle, root, manifest):
+    import shutil
+    if (root/'RELEASE_LOCK.json').exists():
+        raise ValueError('This installation is release-locked. Use wikcia recovery repair, or stage an approved upgrade in a new directory.')
+    for name, directory in [('source', 'hermes-agent'), ('desktop', 'Desktop'), ('seed', '')]:
+        payload = manifest['payloads'][name]
+        if name == 'seed':
+            apply_seed(bundle / payload['file'], root)
+        else:
+            extract_zip(bundle / payload['file'], root / directory)
+    for directory in ['bootstrap']:
+        if (bundle / directory).is_dir():
+            shutil.copytree(bundle / directory, root / directory, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    for name in ['launch.py', 'installer.py', 'install_engine.py', 'asset_setup.py', 'FEATURES.json', 'FIRST-RUN.txt']:
+        if (bundle / name).is_file():
+            shutil.copy2(bundle / name, root / name)
+    if (bundle / 'manifest.json').is_file():
+        shutil.copy2(bundle / 'manifest.json', root / 'wikcia-install-manifest.json')
+    old_manifest = root / 'manifest.json'
+    if old_manifest.is_file() and (root / 'wikcia-install-marker.txt').is_file():
+        try:
+            if json.loads(old_manifest.read_text(encoding='utf-8')).get('product') == 'Wikcia Studio':
+                old_manifest.unlink()
+        except (OSError, ValueError):
+            pass
+    (root / 'wikcia-install-marker.txt').write_text('Wikcia Studio isolated installation\n', encoding='utf-8')
+    import importlib.util
+    shutil.copy2(bundle/'wikcia_setup.py', root/'wikcia_setup.py')
+    shutil.copy2(bundle/'wikcia-owned-files.json', root/'wikcia-owned-files.json')
+    spec = importlib.util.spec_from_file_location('wikcia_setup', root/'wikcia_setup.py')
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    helper.stage_control(bundle, root, manifest.get('release_id', 'wikcia-owned'))
+
+
+def apply_seed(archive, root):
+    import json
+    import shutil
+    import uuid
+    root = Path(root).resolve()
+    temporary = root / 'cache' / ('seed-stage-' + uuid.uuid4().hex)
+    extract_zip(archive, temporary)
+    backup = root / 'backups' / ('seed-upgrade-' + uuid.uuid4().hex)
+    forbidden = {'auth.json', '.env', 'config.yaml', 'state.db', 'USER.md', 'MEMORY.md'}
+    try:
+        sources = [p for p in temporary.rglob('*') if p.is_file()]
+        if any(p.name in forbidden for p in sources):
+            raise ValueError('Seed contains private profile state')
+        ledger = {}
+        for source in sources:
+            relative = source.relative_to(temporary)
+            destination = root / relative
+            if not destination.resolve().is_relative_to(root):
+                raise ValueError('Seed destination escapes the isolated install')
+            digest = sha256(source)
+            if destination.is_file():
+                if relative.as_posix() == 'SOUL.md' or sha256(destination) == digest:
+                    continue
+                saved = backup / relative
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(destination, saved)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            ledger[relative.as_posix()] = digest
+        (root / 'managed-seed-files.json').write_text(json.dumps(ledger, indent=2), encoding='utf-8')
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def plan_components(components, root, discovered, probe=True):
+    import shutil
+    import subprocess
+    result = []
+    for component in components:
+        existing = discovered.get(component['id'], {})
+        if not existing.get('executable') or not Path(existing['executable']).is_file():
+            existing = {}
+            for candidate in component.get('detect', []):
+                path = Path(expanded(candidate, root))
+                if path.is_file():
+                    existing = {'executable': str(path), 'installation_path': str(path.parent)}
+                    break
+            if not existing:
+                for command in component.get('commands', []):
+                    executable = shutil.which(command)
+                    if executable:
+                        existing = {'executable': executable, 'installation_path': str(Path(executable).parent)}
+                        break
+        if probe and existing and component.get('module'):
+            expected = {name: version for package in component.get('packages', [])
+                        if '==' in package
+                        for name, version in [package.split('==', 1)]}
+            code = ('import importlib,importlib.metadata as metadata,json;'
+                    'importlib.import_module(' + repr(component['module']) + ');'
+                    'print(json.dumps({name: metadata.version(name) for name in ' +
+                    repr(list(expected)) + '}))')
+            try:
+                checked = subprocess.run([existing['executable'], '-c', code],
+                                         check=False, capture_output=True, timeout=120,
+                                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                if checked.returncode:
+                    existing = {}
+                elif expected:
+                    import json as _json
+                    actual = _json.loads(checked.stdout)
+                    if any(actual.get(name) != version for name, version in expected.items()):
+                        existing = {}
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                existing = {}
+        result.append({'id': component['id'], 'name': component['name'],
+                       'action': 'reuse' if existing else 'install', 'existing': existing})
+    return result
+
+
+def main(argv=None):
+    import json
+    import os
+    parser = argparse.ArgumentParser(description='Install Wikcia Studio (pure rebrand) and download/install every app component.')
+    parser.add_argument('--bundle', type=Path, default=Path(__file__).resolve().parent)
+    parser.add_argument('--root', type=Path, default=Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local'))) / 'WikciaStudio')
+    parser.add_argument('--stage-only', action='store_true', help='Stage files without downloading/installing components.')
+    parser.add_argument('--check-only', action='store_true', help='Read-only component discovery; no downloads or writes.')
+    parser.add_argument('--core-only', action='store_true', help='Install Wikcia core only, no extra apps.')
+    parser.add_argument('--all-apps', action='store_true', help='Install every app component (default when no selection given).')
+    parser.add_argument('--apps', nargs='*', help='Component IDs to install (default: all).')
+    parser.add_argument('--skip-models', action='store_true', help='Explicitly omit model assets; the report records this reduced scope.')
+    parser.add_argument('--no-path', action='store_true')
+    parser.add_argument('--no-shortcuts', action='store_true')
+    args = parser.parse_args(argv)
+    bundle, root = args.bundle.resolve(), args.root.resolve()
+    try:
+        manifest = load_bundle(bundle)
+        original = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local'))) / 'hermes'
+        if root == original.resolve() or root.is_relative_to(original.resolve()):
+            raise ValueError('Refusing to install over the existing agent data root.')
+        if args.apps is not None:
+            known = {row['id'] for row in manifest.get('components', [])}
+            unknown = set(args.apps) - known
+            if not args.apps or unknown:
+                raise ValueError('Select valid application IDs. Unknown: ' + ', '.join(sorted(unknown)) + '; available: ' + ', '.join(sorted(known)))
+        if sum([bool(args.core_only), bool(args.all_apps), args.apps is not None]) > 1:
+            raise ValueError('Use only one of --core-only, --all-apps or --apps.')
+        if args.check_only:
+            from install_engine import discover
+            existing, _evidence = discover(root, bundle / manifest['payloads']['seed']['file'])
+            print(json.dumps(plan_components(manifest.get('components', []), root, existing, probe=False), indent=2))
+            return 0
+        stage(bundle, root, manifest)
+        if args.stage_only:
+            print('STAGED ONLY: ' + str(root) + ' (runtime not installed)')
+            return 0
+        from install_engine import configure_product, install_core
+        report = {'status': 'installing', 'core': {}, 'product': {}, 'components': [], 'assets': []}
+        report_path = root / 'installation-report.json'
+        report_path.write_text(json.dumps(report, indent=2), encoding='utf-8')
+        try:
+            report['core'] = install_core(root, manifest, root / 'install-logs/core.log')
+            report['product'] = configure_product(root, manifest)
+            if not args.core_only:
+                from asset_setup import install_assets
+                from install_engine import install_extra_suite
+                want = None if args.all_apps or not args.apps else set(args.apps)
+                report['components'] = install_extra_suite(root, manifest, want=want)
+                if want is None and not args.skip_models:
+                    paths_file = root / 'installed-components.json'
+                    paths = json.loads(paths_file.read_text(encoding='utf-8')) if paths_file.is_file() else {}
+                    report['assets'] = install_assets(root, manifest, paths)
+                else:
+                    report['assets_status'] = 'not requested: selected-app/core/model-skip installation'
+            else:
+                report['assets_status'] = 'not requested: core-only installation'
+            from wikcia_setup import stage_control, initialize_recovery
+            stage_control(bundle, root, manifest.get('release_id', 'wikcia-owned'))
+            report['recovery'] = initialize_recovery(root, manifest)
+            if not args.no_shortcuts or not args.no_path:
+                from install_engine import integrate_windows
+                integrate_windows(root, shortcuts=not args.no_shortcuts, user_path=not args.no_path)
+        except Exception as exc:
+            report.update(status='failed', error=str(exc))
+            report_path.write_text(json.dumps(report, indent=2), encoding='utf-8')
+            raise
+        failures = [row for row in report['components'] + report['assets'] if row['status'] == 'failed']
+        report['status'] = 'partial' if failures else 'installed'
+        report['scope'] = 'core-only' if args.core_only else ('selected-apps' if args.apps and not args.all_apps else ('full-without-models' if args.skip_models else 'full'))
+        report['authentication'] = 'The recipient must use their own model-provider accounts; no source credentials or access grants are included.'
+        report_path.write_text(json.dumps(report, indent=2), encoding='utf-8')
+        print(('WIKCIA INSTALLED; SOME COMPONENTS NEED ATTENTION: ' if failures else 'WIKCIA INSTALLED: ') + str(root), flush=True)
+        print('Report: ' + str(root / 'installation-report.json'), flush=True)
+        if (root / 'FIRST-RUN.txt').is_file():
+            print('Native panels and first launch: ' + str(root / 'FIRST-RUN.txt'), flush=True)
+        return 2 if failures else 0
+    except Exception as exc:  # noqa: BLE001 -- top-level installer reports failure and exits nonzero
+        print('INSTALLATION FAILED: ' + str(exc))
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

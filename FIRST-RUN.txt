@@ -1,0 +1,52 @@
+WIKCIA STUDIO - FIRST LAUNCH AND INCLUDED INTERFACE
+
+Run INSTALL-WIKCIA.cmd from this complete extracted installer folder.
+The default installs the native Desktop, Wikcia CLI/Hermes runtime, product
+modules, configured application suite, browser prerequisites and model assets.
+FEATURES.json is the checked interface/module inclusion contract.
+
+MAIN TABS AND DESIGN
+Chat, Studio, Agents, Projects, Tools, Automations, Apps and Settings are
+included, with the Wikcia Digital Atelier design, light/dark canvas control,
+conversation/history panes and the Intelligence sidebar.
+
+NATIVE EXTENSIONS: INCLUDED AND ENABLED ON FIRST LAUNCH
+The bundled agent/backend plugins are enabled by setup. All four product
+Desktop packages below are also enabled by default on a new installation.
+No sender UI-preference store is copied. Explicit recipient enable/disable
+choices take precedence and are retained across restart, repair and upgrade.
+
+1. Open Wikcia Studio and complete provider setup using YOUR own account, or
+   choose an installed local model. Provider setup may be deferred to inspect
+   the interface; choosing a provider later does not verify model execution.
+2. The included Desktop packages are:
+     Lead Intelligence
+     Love & Pixels Founders Edition
+     Maps Research
+     Wikcia Application Hub
+3. To disable a panel, open Tools > Plugins and use its Desktop switch.
+   The Agent and Desktop switches are different. Installation of panels does
+   not start application services, sign in accounts or authorize inference.
+4. The enabled interfaces include Love & Pixels Studio, Multi-LLM Control
+   Center, Application Hub, Creative Studio, Research Center, Document
+   Intelligence, Workflow Studio, Model & Provider Center, System Control,
+   Lead Intelligence and Maps Research.
+
+WHAT IS NOT COPIED
+The sender's credentials, browser logins, sessions, CRM/customer records,
+projects, telemetry decisions and private model-routing/consent configuration
+are not transferred. Existing recipient credentials and persona are preserved.
+Connect required external accounts yourself; installation does not authorize
+purchases, paid inference, research acknowledgements or publishing.
+
+VERIFICATION BOUNDARIES
+This installer retains the native application and its functionality; it is not
+a screenshot recreation or replacement dashboard. Navigation/rendering and
+installed files are separate from actual model generation, authenticated
+integrations and each application's processing operations. These may require
+recipient setup, a running service and suitable hardware. An Apps catalogue
+entry alone is not proof that a service is running.
+
+On a new computer, download time and disk requirements can be substantial.
+Read README.txt and the installation report. For repair, close only the Wikcia
+installation being repaired and rerun this installer. Keep earlier releases.
