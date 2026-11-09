@@ -7,8 +7,12 @@ subscription framing, no Nous upstream version claims.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -49,30 +53,46 @@ def sha256(path):
     return digest.hexdigest()
 
 
-import hashlib
 
 
-def download(url, dest, expected_sha256):
+def github_token():
+    """Best-effort OAuth token from the already-authenticated gh CLI.
+
+    Never prompts and never writes secrets. Returns None when unavailable.
+    """
+    try:
+        result = subprocess.run(['gh', 'auth', 'token'], capture_output=True,
+                                text=True, check=False, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def download(url, dest, expected_sha256=None, token=None):
     import re
-    import shutil
-    import urllib.request
     from urllib.parse import urlsplit
+    import urllib.request
     parsed = urlsplit(url)
     if parsed.username or parsed.password or (parsed.scheme != 'https' and not (parsed.scheme == 'http' and parsed.hostname == '127.0.0.1')):
         raise ValueError('Downloads require credential-free HTTPS URLs.')
-    if not re.fullmatch('[0-9a-fA-F]{64}', expected_sha256 or ''):
+    if expected_sha256 is not None and not re.fullmatch('[0-9a-fA-F]{64}', expected_sha256 or ''):
         raise ValueError('A pinned SHA-256 is required.')
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() and sha256(dest).lower() == expected_sha256.lower():
+    if dest.exists() and expected_sha256 is not None and sha256(dest).lower() == expected_sha256.lower():
         return dest
     dest.unlink(missing_ok=True)
     partial = dest.with_suffix(dest.suffix + '.partial')
+    headers = {'User-Agent': 'WikciaStudio-Installer/1.0'}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
     try:
-        request = urllib.request.Request(url, headers={'User-Agent': 'WikciaStudio-Installer/1.0'})
-        with urllib.request.urlopen(request, timeout=90) as source, partial.open('wb') as output:
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(request, timeout=120) as source, partial.open('wb') as output:
             shutil.copyfileobj(source, output, 1024 * 1024)
-        if sha256(partial).lower() != expected_sha256.lower():
+        if expected_sha256 is not None and sha256(partial).lower() != expected_sha256.lower():
             raise ValueError('Downloaded file checksum mismatch: ' + dest.name)
         partial.replace(dest)
         return dest
@@ -87,6 +107,68 @@ def load_bundle(bundle):
         if not path.is_relative_to(bundle.resolve()) or not path.is_file() or sha256(path) != item['sha256']:
             raise ValueError('Bundle checksum failed: ' + item['file'])
     return manifest
+
+
+DEFAULT_REPO = 'jpwytacc-cyber/wikcia-studio-installer'
+DEFAULT_RELEASE = 'r5'
+
+
+def github_api_url(repo, path):
+    return 'https://api.github.com/repos/' + repo + '/' + path.lstrip('/')
+
+
+def release_tag(repo, release, token):
+    if release:
+        return release
+    import urllib.request
+    import json
+    headers = {'User-Agent': 'WikciaStudio-Installer/1.0'}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+    request = urllib.request.Request(github_api_url(repo, '/releases/latest'), headers=headers)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        data = json.loads(response.read().decode('utf-8'))
+    tag = data.get('tag_name')
+    if not tag:
+        raise ValueError('GitHub latest release has no tag_name')
+    return tag
+
+
+def fetch_bundle_from_repo(repo, release, workdir, token=None):
+    """Download manifest.json and pinned payloads from a Wikcia release on GitHub.
+
+    Every payload is verified against the manifest SHA-256 before it is kept.
+    Returns the manifest dict. The workdir becomes a bundle directory the
+    rest of this installer consumes unchanged.
+    """
+    import json
+    workdir = Path(workdir).resolve()
+    workdir.mkdir(parents=True, exist_ok=True)
+    tag = release_tag(repo, release, token)
+    headers = {'User-Agent': 'WikciaStudio-Installer/1.0'}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+
+    manifest_path = workdir / 'manifest.json'
+    download('https://raw.githubusercontent.com/' + repo + '/main/manifest.json',
+             manifest_path, None, token)
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8-sig'))
+
+    for key, entry in manifest.get('payloads', {}).items():
+        file_name = entry['file']
+        url = 'https://github.com/' + repo + '/releases/download/' + tag + '/' + file_name
+        download(url, workdir / file_name, entry['sha256'], token)
+
+    # Pinned bootstrap runtime (CPython + uv) the Wikcia launcher runs from.
+    bootstrap_entry = manifest.get('payloads', {}).get('bootstrap')
+    if bootstrap_entry:
+        download('https://github.com/' + repo + '/releases/download/' + tag + '/bootstrap.zip',
+                 workdir / 'bootstrap.zip', bootstrap_entry['sha256'], token)
+        import zipfile as _zipfile
+        with _zipfile.ZipFile(workdir / 'bootstrap.zip') as bootstrap_archive:
+            bootstrap_archive.extractall(workdir / 'bootstrap')
+
+    return manifest, tag
 
 
 def stage(bundle, root, manifest):
@@ -209,6 +291,9 @@ def main(argv=None):
     import os
     parser = argparse.ArgumentParser(description='Install Wikcia Studio (pure rebrand) and download/install every app component.')
     parser.add_argument('--bundle', type=Path, default=Path(__file__).resolve().parent)
+    parser.add_argument('--repo', default=DEFAULT_REPO, help='GitHub repository (OWNER/REPO) to fetch the Wikcia release manifest and payloads from.')
+    parser.add_argument('--release', default=None, help='Release tag (default: latest release on the repository).')
+    parser.add_argument('--github-token', default=None, help='GitHub token (default: WIKCIA_GITHUB_TOKEN or gh auth token).')
     parser.add_argument('--root', type=Path, default=Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local'))) / 'WikciaStudio')
     parser.add_argument('--stage-only', action='store_true', help='Stage files without downloading/installing components.')
     parser.add_argument('--check-only', action='store_true', help='Read-only component discovery; no downloads or writes.')
@@ -219,7 +304,16 @@ def main(argv=None):
     parser.add_argument('--no-path', action='store_true')
     parser.add_argument('--no-shortcuts', action='store_true')
     args = parser.parse_args(argv)
-    bundle, root = args.bundle.resolve(), args.root.resolve()
+    token = args.github_token or os.environ.get('WIKCIA_GITHUB_TOKEN') or github_token()
+    if args.repo:
+        bundle = Path(tempfile.mkdtemp(prefix='wikcia-repo-bundle-'))
+        manifest, release_tag_value = fetch_bundle_from_repo(args.repo, args.release, bundle, token)
+        print('Fetched Wikcia release ' + release_tag_value + ' from ' + args.repo, flush=True)
+    else:
+        bundle = args.bundle.resolve()
+        manifest = load_bundle(bundle)
+        release_tag_value = 'local'
+    root = args.root.resolve()
     try:
         manifest = load_bundle(bundle)
         original = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local'))) / 'hermes'

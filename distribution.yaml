@@ -1,0 +1,14 @@
+name: wikcia-studio-installer
+version: "20261109-r5"
+description: "Wikcia Studio installer distribution — Wikcia-owned Hermes build with enforced release lock and same-release self-healing"
+hermes_requires: ">=0.12.0"
+author: "Wikcia Studio"
+license: "MIT"
+
+# Recipients bring their own model/provider accounts and consent grants.
+# No credentials, tokens, sessions, or private state are included in this distribution.
+env_requires: []
+
+# Installer consumes manifest.json from this repository and downloads pinned
+# payloads (source.zip, desktop.zip, seed.zip, bootstrap.zip) from the matching
+# GitHub Release, verifying every SHA-256 before unpacking.
