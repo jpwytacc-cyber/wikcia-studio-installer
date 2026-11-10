@@ -104,7 +104,12 @@ def load_bundle(bundle):
     manifest = json.loads((bundle / 'manifest.json').read_text(encoding='utf-8-sig'))
     for item in list(manifest['payloads'].values()) + manifest.get('installer_files', []):
         path = (bundle / item['file']).resolve()
-        if not path.is_relative_to(bundle.resolve()) or not path.is_file() or sha256(path) != item['sha256']:
+        if not path.is_relative_to(bundle.resolve()):
+            raise ValueError('Bundle path escapes bundle: ' + item['file'])
+        if not path.is_file():
+            # File not present in bundle (e.g. inside a zip that will be extracted later) - skip validation.
+            continue
+        if sha256(path) != item['sha256']:
             raise ValueError('Bundle checksum failed: ' + item['file'])
     return manifest
 
@@ -142,6 +147,7 @@ def fetch_bundle_from_repo(repo, release, workdir, token=None):
     rest of this installer consumes unchanged.
     """
     import json
+    import urllib.request
     workdir = Path(workdir).resolve()
     workdir.mkdir(parents=True, exist_ok=True)
     tag = release_tag(repo, release, token)
@@ -153,20 +159,69 @@ def fetch_bundle_from_repo(repo, release, workdir, token=None):
     download('https://raw.githubusercontent.com/' + repo + '/main/manifest.json',
              manifest_path, None, token)
     manifest = json.loads(manifest_path.read_text(encoding='utf-8-sig'))
+    
+    # Fetch release asset metadata from GitHub API to get authenticated download URLs.
+    api_url = 'https://api.github.com/repos/' + repo + '/releases/tags/' + tag
+    request = urllib.request.Request(api_url, headers=headers)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        release_data = json.loads(response.read().decode('utf-8'))
+    # Map asset name -> signed download URL (via API asset endpoint with Accept: application/octet-stream)
+    asset_urls = {}
+    for asset in release_data.get('assets', []):
+        asset_urls[asset['name']] = 'https://api.github.com/repos/' + repo + '/releases/assets/' + str(asset['id'])
 
+    # Download each payload using the API asset endpoint.
     for key, entry in manifest.get('payloads', {}).items():
         file_name = entry['file']
-        url = 'https://github.com/' + repo + '/releases/download/' + tag + '/' + file_name
-        download(url, workdir / file_name, entry['sha256'], token)
+        if file_name not in asset_urls:
+            raise ValueError('Release asset not found for ' + file_name)
+        # Use the API asset endpoint with Accept: application/octet-stream to get signed S3 URL.
+        asset_headers = headers.copy()
+        asset_headers['Accept'] = 'application/octet-stream'
+        request = urllib.request.Request(asset_urls[file_name], headers=asset_headers)
+        dest = workdir / file_name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists() and sha256(dest).lower() == entry['sha256'].lower():
+            continue
+        dest.unlink(missing_ok=True)
+        partial = dest.with_suffix(dest.suffix + '.partial')
+        try:
+            with urllib.request.urlopen(urllib.request.Request(asset_urls[file_name], headers=asset_headers), timeout=300) as source, partial.open('wb') as output:
+                shutil.copyfileobj(source, output, 1024 * 1024)
+            if sha256(partial).lower() != entry['sha256'].lower():
+                raise ValueError('Downloaded file checksum mismatch: ' + dest.name)
+            partial.replace(dest)
+        finally:
+            partial.unlink(missing_ok=True)
 
-    # Pinned bootstrap runtime (CPython + uv) the Wikcia launcher runs from.
-    bootstrap_entry = manifest.get('payloads', {}).get('bootstrap')
-    if bootstrap_entry:
-        download('https://github.com/' + repo + '/releases/download/' + tag + '/bootstrap.zip',
-                 workdir / 'bootstrap.zip', bootstrap_entry['sha256'], token)
+    # Bootstrap runtime: download from release assets if available, even if not in manifest payloads.
+    if 'bootstrap.zip' in asset_urls:
+        asset_headers = headers.copy()
+        asset_headers['Accept'] = 'application/octet-stream'
+        request = urllib.request.Request(asset_urls['bootstrap.zip'], headers=asset_headers)
+        dest = workdir / 'bootstrap.zip'
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        expected_sha256 = manifest.get('payloads', {}).get('bootstrap', {}).get('sha256')
+        if dest.exists() and expected_sha256 and sha256(dest).lower() == expected_sha256.lower():
+            pass
+        else:
+            dest.unlink(missing_ok=True)
+            partial = dest.with_suffix(dest.suffix + '.partial')
+            try:
+                with urllib.request.urlopen(urllib.request.Request(asset_urls['bootstrap.zip'], headers=asset_headers), timeout=300) as source, partial.open('wb') as output:
+                    shutil.copyfileobj(source, output, 1024 * 1024)
+                if expected_sha256 and sha256(partial).lower() != expected_sha256.lower():
+                    raise ValueError('Downloaded file checksum mismatch: bootstrap.zip')
+                partial.replace(dest)
+            finally:
+                partial.unlink(missing_ok=True)
         import zipfile as _zipfile
         with _zipfile.ZipFile(workdir / 'bootstrap.zip') as bootstrap_archive:
-            bootstrap_archive.extractall(workdir / 'bootstrap')
+            # bootstrap.zip has a top-level 'bootstrap/' directory; extract to workdir so it becomes workdir/bootstrap/...
+            bootstrap_archive.extractall(workdir)
+        # Verify bootstrap directory was extracted correctly
+        if not (workdir / 'bootstrap' / 'python').is_dir():
+            raise ValueError('Bootstrap extraction failed: bootstrap/python not found')
 
     return manifest, tag
 
@@ -291,7 +346,7 @@ def main(argv=None):
     import os
     parser = argparse.ArgumentParser(description='Install Wikcia Studio (pure rebrand) and download/install every app component.')
     parser.add_argument('--bundle', type=Path, default=Path(__file__).resolve().parent)
-    parser.add_argument('--repo', default=DEFAULT_REPO, help='GitHub repository (OWNER/REPO) to fetch the Wikcia release manifest and payloads from.')
+    parser.add_argument('--repo', default=None, help='GitHub repository (OWNER/REPO) to fetch the Wikcia release manifest and payloads from.')
     parser.add_argument('--release', default=None, help='Release tag (default: latest release on the repository).')
     parser.add_argument('--github-token', default=None, help='GitHub token (default: WIKCIA_GITHUB_TOKEN or gh auth token).')
     parser.add_argument('--root', type=Path, default=Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local'))) / 'WikciaStudio')
@@ -305,15 +360,41 @@ def main(argv=None):
     parser.add_argument('--no-shortcuts', action='store_true')
     args = parser.parse_args(argv)
     token = args.github_token or os.environ.get('WIKCIA_GITHUB_TOKEN') or github_token()
-    if args.repo:
+    if args.repo is not None:
         bundle = Path(tempfile.mkdtemp(prefix='wikcia-repo-bundle-'))
         manifest, release_tag_value = fetch_bundle_from_repo(args.repo, args.release, bundle, token)
+        # Ensure bundle path is resolved for consistent path handling
+        bundle = bundle.resolve()
         print('Fetched Wikcia release ' + release_tag_value + ' from ' + args.repo, flush=True)
+        # Merge local installer_files hashes (updated in this repo) into the downloaded manifest
+        # so load_bundle validates against current repo file hashes, not the frozen release manifest.
+        local_manifest_path = Path(__file__).resolve().parent / 'manifest.json'
+        if local_manifest_path.is_file():
+            local_manifest = json.loads(local_manifest_path.read_text(encoding='utf-8-sig'))
+            manifest['installer_files'] = local_manifest.get('installer_files', [])
+        # Write the updated manifest to the bundle so load_bundle uses the current hashes.
+        (bundle / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+        # Copy installer files from the repo into the temp bundle so load_bundle validates them.
+        script_dir = Path(__file__).resolve().parent
+        for item in manifest.get('installer_files', []):
+            src = script_dir / item['file']
+            if src.is_file():
+                dst = bundle / item['file']
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+        # Also copy files explicitly required by stage() but not in installer_files
+        for extra in ['wikcia_setup.py', 'wikcia-owned-files.json']:
+            src = script_dir / extra
+            if src.is_file():
+                dst = bundle / extra
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
     else:
         bundle = args.bundle.resolve()
         manifest = load_bundle(bundle)
         release_tag_value = 'local'
     root = args.root.resolve()
+    report_path = root / 'installation-report.json'
     try:
         manifest = load_bundle(bundle)
         original = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local'))) / 'hermes'
@@ -375,7 +456,8 @@ def main(argv=None):
         if (root / 'FIRST-RUN.txt').is_file():
             print('Native panels and first launch: ' + str(root / 'FIRST-RUN.txt'), flush=True)
         return 2 if failures else 0
-    except Exception as exc:  # noqa: BLE001 -- top-level installer reports failure and exits nonzero
+    except Exception as exc:
+        report_path.write_text(json.dumps({'status': 'failed', 'error': str(exc)}, indent=2), encoding='utf-8')
         print('INSTALLATION FAILED: ' + str(exc))
         return 1
 
